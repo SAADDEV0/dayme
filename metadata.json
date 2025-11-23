@@ -1,0 +1,5 @@
+{
+  "name": "Dayme",
+  "description": "A private, offline-first personal journaling application. Securely stores entries in your browser.",
+  "requestFramePermissions": []
+}
