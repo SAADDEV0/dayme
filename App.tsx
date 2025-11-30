@@ -1,11 +1,9 @@
-
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Plus, Search, Calendar, ChevronLeft, ChevronRight,
   Trash2, Edit3, Image as ImageIcon, Loader2, LogIn, X, 
   CheckSquare, Square, BookHeart, LogOut, Star, LayoutGrid, Type,
-  Filter, Grid3X3, Home, MoreHorizontal, Check, Maximize2, Wand2, AlignLeft, Calendar as CalendarIcon,
-  Play, Video, Film
+  Filter, Grid3X3, Home, MoreHorizontal, Check, Maximize2
 } from 'lucide-react';
 import { JournalEntry, ViewState, JournalAttachment, GoogleConfig, ChecklistItem } from './types';
 import { DriveService } from './services/driveService';
@@ -56,7 +54,6 @@ const SecureImage = ({
     fallbackSrc, 
     alt, 
     className, 
-    imgClassName = "w-full h-full object-cover",
     onLoad 
 }: { 
     fileId?: string, 
@@ -64,7 +61,6 @@ const SecureImage = ({
     fallbackSrc?: string, 
     alt: string, 
     className?: string,
-    imgClassName?: string,
     onLoad?: () => void
 }) => {
     const [src, setSrc] = useState<string | null>(null);
@@ -101,6 +97,7 @@ const SecureImage = ({
                 let blobUrl: string | null = null;
 
                 // Priority 1: Thumbnail Link (optimized size)
+                // This now hits the persistent Cache API in driveService (Level 2)
                 if (thumbnailUrl) {
                     try {
                         blobUrl = await DriveService.fetchAuthenticatedBlob(thumbnailUrl);
@@ -124,6 +121,7 @@ const SecureImage = ({
                         setSrc(blobUrl);
                         if (onLoad) onLoad();
                     } else {
+                        // If both failed, silently error
                          setHasError(true);
                     }
                 }
@@ -139,7 +137,7 @@ const SecureImage = ({
                 load();
                 observer.disconnect();
             }
-        }, { rootMargin: '200px' });
+        }, { rootMargin: '200px' }); // Load images 200px before they appear
 
         if (containerRef.current) observer.observe(containerRef.current);
         return () => observer.disconnect();
@@ -154,7 +152,7 @@ const SecureImage = ({
     }
 
     return (
-        <div ref={containerRef} className={`relative ${className?.includes('overflow-') ? '' : 'overflow-hidden'} ${className?.includes('bg-') ? '' : 'bg-surface-100 dark:bg-surface-800'} ${className}`}>
+        <div ref={containerRef} className={`relative overflow-hidden bg-surface-100 dark:bg-surface-800 ${className}`}>
              {isLoading && (
                 <div className="absolute inset-0 flex items-center justify-center z-10 bg-surface-50 dark:bg-surface-800">
                     <Loader2 className="w-5 h-5 animate-spin text-surface-300" />
@@ -164,49 +162,10 @@ const SecureImage = ({
                 <img 
                     src={src || fallbackSrc} 
                     alt={alt} 
-                    className={`${imgClassName} transition-opacity duration-500 ${isLoading ? 'opacity-0' : 'opacity-100'}`}
+                    className={`w-full h-full object-cover transition-opacity duration-500 ${isLoading ? 'opacity-0' : 'opacity-100'}`}
                 />
             )}
         </div>
-    );
-};
-
-const SecureVideoPlayer = ({ fileId, className, autoPlay }: { fileId: string, className?: string, autoPlay?: boolean }) => {
-    const [src, setSrc] = useState<string | null>(null);
-    const [error, setError] = useState(false);
-
-    useEffect(() => {
-        let active = true;
-        DriveService.downloadMedia(fileId).then(url => {
-            if (active) setSrc(url);
-        }).catch(e => {
-            console.error(e);
-            if (active) setError(true);
-        });
-        return () => { active = false; };
-    }, [fileId]);
-
-    if (error) return (
-        <div className={`flex flex-col items-center justify-center bg-black text-surface-400 ${className}`}>
-            <Video className="w-8 h-8 opacity-50 mb-2" />
-            <span className="text-xs">Error loading video</span>
-        </div>
-    );
-
-    if (!src) return (
-        <div className={`flex items-center justify-center bg-black text-white ${className}`}>
-            <Loader2 className="w-8 h-8 animate-spin text-white/50" />
-        </div>
-    );
-
-    return (
-        <video 
-            src={src} 
-            controls 
-            autoPlay={autoPlay} 
-            playsInline
-            className={`bg-black ${className}`} 
-        />
     );
 };
 
@@ -509,65 +468,72 @@ const CalendarView: React.FC<{
 };
 
 const PhotoGalleryView: React.FC = () => {
-    const [media, setMedia] = useState<JournalAttachment[]>([]);
+    const [images, setImages] = useState<JournalAttachment[]>([]);
     const [isLoading, setIsLoading] = useState(true);
-    const [selectedMedia, setSelectedMedia] = useState<JournalAttachment | null>(null);
+    const [selectedImage, setSelectedImage] = useState<JournalAttachment | null>(null);
     const [filterDate, setFilterDate] = useState('');
     const [filterType, setFilterType] = useState<'month' | 'day'>('month');
 
     useEffect(() => {
-        const fetchMedia = async () => {
+        const fetchImages = async () => {
             setIsLoading(true);
             try {
-                // Now fetching images AND videos
-                const fetchedMedia: any[] = await DriveService.getAllMedia();
+                // Now fetching images with metadata to see the real journal date
+                const fetchedImages: any[] = await DriveService.getAllImages();
                 
-                // Process media
-                const processedMedia = fetchedMedia
-                    .filter(f => f.mimeType.startsWith('image/') || f.mimeType.startsWith('video/'))
+                // Process images to use appProperties.journalDate if available, else createdTime
+                const processedImages = fetchedImages
+                    .filter(f => f.mimeType.startsWith('image/'))
                     .map(f => ({
                         ...f,
+                        // Priority: Journal Date (Metadata) -> Created Date
                         journalDate: f.appProperties?.journalDate || f.createdTime
                     }));
 
                 // Sort by the derived date desc
-                processedMedia.sort((a, b) => {
+                processedImages.sort((a, b) => {
                     const dateA = new Date(a.journalDate).getTime();
                     const dateB = new Date(b.journalDate).getTime();
                     return dateB - dateA;
                 });
-                setMedia(processedMedia);
+                setImages(processedImages);
             } catch (e) {
-                console.error("Failed to load media", e);
+                console.error("Failed to load photos", e);
             } finally {
                 setIsLoading(false);
             }
         };
-        fetchMedia();
+        fetchImages();
     }, []);
 
-    const filteredMedia = useMemo(() => {
-        if (!filterDate) return media;
-        return media.filter(item => {
-            const dateStr = item.journalDate;
+    const filteredImages = useMemo(() => {
+        if (!filterDate) return images;
+        return images.filter(img => {
+            const dateStr = img.journalDate;
             if (!dateStr) return false;
             
             // Standardize checks
             if (filterType === 'month') {
+                // Check YYYY-MM match
                 return dateStr.startsWith(filterDate);
             } else {
+                // Check YYYY-MM-DD match (Day filter)
                 return dateStr.startsWith(filterDate);
             }
         });
-    }, [media, filterDate, filterType]);
+    }, [images, filterDate, filterType]);
 
     const getFilterLabel = () => {
         if (!filterDate) return '';
         const parts = filterDate.split('-').map(Number);
+        
+        // Handle Month (YYYY-MM) vs Day (YYYY-MM-DD)
         const y = parts[0];
         const m = parts[1];
         const d = parts.length > 2 ? parts[2] : 1;
+        
         const date = new Date(y, m - 1, d);
+        
         return date.toLocaleDateString('default', { 
             month: 'long', 
             year: 'numeric',
@@ -585,11 +551,11 @@ const PhotoGalleryView: React.FC = () => {
                         <div>
                             <h2 className="text-2xl md:text-3xl font-bold text-surface-900 dark:text-white tracking-tight flex items-center gap-3">
                                 <ImageIcon className="w-6 h-6 md:w-8 md:h-8 text-brand-500" />
-                                Gallery
+                                Photo Gallery
                             </h2>
                             <p className="text-surface-500 text-sm mt-1">
                                 {filterDate 
-                                    ? `Showing media from ${getFilterLabel()}`
+                                    ? `Showing photos from ${getFilterLabel()}`
                                     : 'All moments captured in your journal.'}
                             </p>
                         </div>
@@ -599,7 +565,7 @@ const PhotoGalleryView: React.FC = () => {
                                 value={filterType}
                                 onChange={(e) => {
                                     setFilterType(e.target.value as 'month' | 'day');
-                                    setFilterDate('');
+                                    setFilterDate(''); // Reset value on type change
                                 }}
                                 className="bg-transparent text-sm font-bold text-surface-600 dark:text-surface-300 focus:outline-none cursor-pointer pl-2 pr-1 py-1 hover:text-brand-600 transition-colors"
                             >
@@ -631,48 +597,38 @@ const PhotoGalleryView: React.FC = () => {
                     </div>
                 </header>
 
-                {filteredMedia.length === 0 ? (
+                {filteredImages.length === 0 ? (
                     <div className="flex flex-col items-center justify-center py-20 opacity-50">
                         <ImageIcon className="w-12 h-12 text-surface-300 mb-4" />
                         <p className="font-medium text-sm text-surface-500">
-                            {filterDate ? `No media found for this ${filterType}.` : 'No photos or videos yet.'}
+                            {filterDate ? `No photos found for this ${filterType}.` : 'No photos yet.'}
                         </p>
                         {filterDate && (
                             <button onClick={() => setFilterDate('')} className="mt-4 text-brand-600 dark:text-brand-400 text-sm font-medium hover:underline">
-                                Show all media
+                                Show all photos
                             </button>
                         )}
                     </div>
                 ) : (
                     <div className="columns-2 md:columns-3 lg:columns-4 xl:columns-5 gap-4 space-y-4 pb-20">
-                        {filteredMedia.map((item) => {
-                            const dateObj = item.journalDate ? new Date(item.journalDate) : null;
+                        {filteredImages.map((img) => {
+                            const dateObj = img.journalDate ? new Date(img.journalDate) : null;
                             const dateLabel = dateObj && !isNaN(dateObj.getTime()) ? dateObj.toLocaleDateString() : '';
-                            const isVideo = item.mimeType.startsWith('video/');
 
                             return (
                                 <div 
-                                    key={item.id} 
-                                    onClick={() => setSelectedMedia(item)}
+                                    key={img.id} 
+                                    onClick={() => setSelectedImage(img)}
                                     className="break-inside-avoid relative group rounded-xl overflow-hidden cursor-zoom-in border border-surface-200 dark:border-surface-800 bg-surface-100 dark:bg-surface-900"
                                 >
                                     <SecureImage 
-                                        fileId={item.id}
-                                        thumbnailUrl={item.thumbnailLink ? item.thumbnailLink.replace(/=s\d+/, '=s500') : undefined}
-                                        alt={item.name}
+                                        fileId={img.id}
+                                        thumbnailUrl={img.thumbnailLink ? img.thumbnailLink.replace(/=s\d+/, '=s500') : undefined}
+                                        alt={img.name}
                                         className="w-full h-auto transition-transform duration-500 group-hover:scale-105"
                                     />
-                                    
-                                    {isVideo && (
-                                        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-                                            <div className="w-10 h-10 rounded-full bg-black/40 backdrop-blur-sm flex items-center justify-center">
-                                                <Play className="w-5 h-5 text-white fill-current ml-0.5" />
-                                            </div>
-                                        </div>
-                                    )}
-
                                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors duration-300 flex items-center justify-center opacity-0 group-hover:opacity-100">
-                                        {isVideo ? <Play className="w-8 h-8 text-white drop-shadow-md" /> : <Maximize2 className="w-6 h-6 text-white drop-shadow-md" />}
+                                        <Maximize2 className="w-6 h-6 text-white drop-shadow-md" />
                                     </div>
                                     {dateLabel && (
                                         <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
@@ -689,37 +645,27 @@ const PhotoGalleryView: React.FC = () => {
             </div>
 
             {/* Lightbox Modal */}
-            {selectedMedia && (
+            {selectedImage && (
                 <div 
                     className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-xl flex items-center justify-center animate-fade-in p-4"
-                    onClick={() => setSelectedMedia(null)}
+                    onClick={() => setSelectedImage(null)}
                 >
                     <button 
-                        onClick={() => setSelectedMedia(null)}
-                        className="absolute top-4 right-4 p-2 text-white/70 hover:text-white bg-white/10 hover:bg-white/20 rounded-full transition-all z-20"
+                        onClick={() => setSelectedImage(null)}
+                        className="absolute top-4 right-4 p-2 text-white/70 hover:text-white bg-white/10 hover:bg-white/20 rounded-full transition-all"
                     >
                         <X className="w-6 h-6" />
                     </button>
                     
-                    <div className="relative w-full h-full flex items-center justify-center" onClick={e => e.stopPropagation()}>
-                         {selectedMedia.mimeType.startsWith('video/') ? (
-                             <SecureVideoPlayer 
-                                fileId={selectedMedia.id} 
-                                autoPlay 
-                                className="max-w-full max-h-[90vh] w-auto h-auto rounded-lg shadow-2xl" 
-                             />
-                         ) : (
-                             <SecureImage 
-                                fileId={selectedMedia.id}
-                                thumbnailUrl={selectedMedia.thumbnailLink ? selectedMedia.thumbnailLink.replace(/=s\d+/, '=s1600') : undefined}
-                                alt={selectedMedia.name}
-                                className="!bg-transparent !overflow-visible flex items-center justify-center"
-                                imgClassName="max-w-[95vw] max-h-[90vh] w-auto h-auto object-contain shadow-2xl rounded-sm"
-                            />
-                         )}
-                         
-                         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/50 backdrop-blur px-4 py-2 rounded-full text-white/90 text-sm font-medium pointer-events-none">
-                             {selectedMedia.journalDate ? new Date(selectedMedia.journalDate).toLocaleDateString(undefined, { dateStyle: 'long' }) : 'Unknown Date'}
+                    <div className="relative max-w-full max-h-full" onClick={e => e.stopPropagation()}>
+                         <SecureImage 
+                            fileId={selectedImage.id}
+                            thumbnailUrl={selectedImage.thumbnailLink ? selectedImage.thumbnailLink.replace(/=s\d+/, '=s1600') : undefined}
+                            alt={selectedImage.name}
+                            className="max-w-full max-h-[90vh] object-contain rounded-sm shadow-2xl"
+                        />
+                         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-black/50 backdrop-blur px-4 py-2 rounded-full text-white/90 text-sm font-medium">
+                             {selectedImage.journalDate ? new Date(selectedImage.journalDate).toLocaleDateString(undefined, { dateStyle: 'long' }) : 'Unknown Date'}
                          </div>
                     </div>
                 </div>
@@ -901,227 +847,150 @@ const EntryEditorView: React.FC<{
       }
   };
 
-  const handleAutoFormat = () => {
-      let text = content;
-      text = text.replace(/\n{3,}/g, '\n\n');
-      if (text.length > 0) text = text.charAt(0).toUpperCase() + text.slice(1);
-      text = text.replace(/([.!?]\s+)([a-z])/g, (match, sep, char) => sep + char.toUpperCase());
-      text = text.replace(/\s+([.,!?;:])/g, '$1');
-      text = text.replace(/([.,!?;:])([a-zA-Z])/g, '$1 $2');
-      text = text.replace(/^\* /gm, '- ');
-      setContent(text);
-  };
-
   return (
-      <div className="fixed inset-0 z-[60] bg-surface-50 dark:bg-black flex flex-col animate-slide-up select-none">
+      <div className="fixed inset-0 z-[60] bg-surface-50 dark:bg-black flex flex-col animate-slide-up">
           {/* Editor Header */}
-          <div className="flex items-center justify-between px-4 md:px-8 py-4 bg-white/80 dark:bg-black/80 backdrop-blur-md border-b border-surface-200 dark:border-surface-800 sticky top-0 z-20">
+          <div className="flex items-center justify-between px-4 py-3 bg-white/80 dark:bg-black/80 backdrop-blur-md border-b border-surface-200 dark:border-surface-800 sticky top-0 z-20">
+              <button onClick={onCancel} className="p-2 rounded-full hover:bg-surface-100 dark:hover:bg-surface-800 transition-colors">
+                  <X className="w-5 h-5 text-surface-500" />
+              </button>
+              
               <div className="flex items-center gap-2">
-                 <button onClick={onCancel} className="px-3 py-1.5 rounded-lg text-surface-500 hover:text-surface-900 dark:hover:text-surface-100 hover:bg-surface-100 dark:hover:bg-surface-900 transition-colors font-medium text-sm">
-                      Cancel
-                 </button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                  <button 
-                      onClick={handleAutoFormat}
-                      title="Auto Format Text"
-                      className="p-2 rounded-lg text-brand-600 dark:text-brand-400 hover:bg-brand-50 dark:hover:bg-brand-900/20 transition-colors"
-                  >
-                      <Wand2 className="w-5 h-5" />
-                  </button>
-
-                  <div className="w-px h-5 bg-surface-300 dark:bg-surface-700 mx-1" />
-
-                  <Button onClick={handleSave} disabled={isSaving || (!title && !content)} className="px-5 py-2 text-sm font-semibold rounded-full">
+                  <div className="hidden md:flex gap-1 bg-surface-100 dark:bg-surface-900 rounded-lg p-1 mr-2">
+                      {MOODS.map(m => (
+                          <button 
+                              key={m.id} 
+                              onClick={() => setMood(m.id)}
+                              className={`w-7 h-7 rounded flex items-center justify-center text-sm transition-all ${mood === m.id ? 'bg-white dark:bg-surface-800 shadow-sm' : 'opacity-40 hover:opacity-100'}`}
+                          >
+                              {m.emoji}
+                          </button>
+                      ))}
+                  </div>
+                  <Button onClick={() => fileInputRef.current?.click()} variant="secondary" className="!p-2">
+                      <ImageIcon className="w-4 h-4" />
+                  </Button>
+                  <Button onClick={handleSave} disabled={isSaving || (!title && !content)} className="px-6 py-2 text-sm">
                       {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save'}
                   </Button>
               </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto bg-surface-50 dark:bg-black">
-              <div className="max-w-2xl mx-auto px-6 py-10">
-                  
-                  {/* Meta Bar */}
-                  <div className="flex flex-col gap-6 mb-8">
-                       <div className="flex items-center gap-2 relative group w-fit">
-                            <CalendarIcon className="w-4 h-4 text-surface-400" />
-                            <input 
-                                type="date" 
-                                value={new Date(date).toLocaleDateString('en-CA')} 
-                                onChange={e => {
-                                    if (!e.target.value) return;
-                                    const [y, m, d] = e.target.value.split('-').map(Number);
-                                    const localDate = new Date(y, m - 1, d);
-                                    setDate(localDate.toISOString());
-                                }} 
-                                className="bg-transparent text-sm font-bold uppercase tracking-widest text-surface-500 hover:text-brand-600 dark:text-surface-400 dark:hover:text-brand-400 border-none focus:ring-0 p-0 cursor-pointer select-none"
-                            />
-                       </div>
-
-                       <div className="flex gap-2 overflow-x-auto pb-2 no-scrollbar mask-gradient-r">
-                           {MOODS.map(m => (
-                               <button 
-                                   key={m.id} 
-                                   onClick={() => setMood(m.id === mood ? '' : m.id)}
-                                   className={`flex-none px-3 py-1.5 rounded-full text-xs font-medium transition-all border flex items-center gap-1.5 select-none
-                                       ${mood === m.id 
-                                           ? 'bg-surface-900 dark:bg-surface-100 text-white dark:text-black border-transparent shadow-md transform scale-105' 
-                                           : 'bg-white dark:bg-surface-900 border-surface-200 dark:border-surface-800 text-surface-500 hover:border-surface-300 dark:hover:border-surface-600'
-                                       }`}
-                               >
-                                   <span className="text-base">{m.emoji}</span> {m.label}
-                               </button>
-                           ))}
+          <div className="flex-1 overflow-y-auto">
+              <div className="max-w-3xl mx-auto px-6 py-8">
+                  <div className="flex items-center gap-4 mb-6">
+                       <input 
+                          type="date" 
+                          // Use CA locale to get YYYY-MM-DD format based on the actual date object time
+                          value={new Date(date).toLocaleDateString('en-CA')} 
+                          onChange={e => {
+                              // Manually construct date from YYYY-MM-DD to preserve local day
+                              // e.target.value is "YYYY-MM-DD"
+                              if (!e.target.value) return;
+                              const [y, m, d] = e.target.value.split('-').map(Number);
+                              // Create date at local midnight
+                              const localDate = new Date(y, m - 1, d);
+                              setDate(localDate.toISOString());
+                          }} 
+                          className="bg-transparent text-xs font-bold uppercase tracking-widest text-surface-400 border-none focus:ring-0 p-0"
+                       />
+                       <div className="md:hidden">
+                           {mood && <span className="text-xl">{MOODS.find(m => m.id === mood)?.emoji}</span>}
                        </div>
                   </div>
 
-                  {/* Title */}
-                  <textarea 
-                      placeholder="Untitled"
+                  <input 
+                      placeholder="Title..."
                       value={title}
                       onChange={e => setTitle(e.target.value)}
-                      rows={1}
-                      className="w-full text-4xl md:text-5xl font-serif font-bold bg-transparent border-none outline-none focus:ring-0 placeholder:text-surface-300 dark:placeholder:text-surface-700 text-surface-900 dark:text-white mb-6 leading-tight resize-none overflow-hidden select-text"
-                      style={{ minHeight: '1.2em' }}
-                      onInput={(e: any) => {
-                          e.target.style.height = 'auto';
-                          e.target.style.height = e.target.scrollHeight + 'px';
-                      }}
+                      className="w-full text-3xl md:text-5xl font-bold bg-transparent border-none outline-none placeholder:text-surface-200 dark:placeholder:text-surface-800 text-surface-900 dark:text-white mb-6 leading-tight"
                   />
 
-                  {/* Content */}
                   <TextArea 
-                      placeholder="Start writing..."
+                      placeholder="What's on your mind?"
                       value={content}
                       onChange={e => setContent(e.target.value)}
-                      className="min-h-[40vh] text-lg leading-loose font-serif text-surface-800 dark:text-surface-200 !px-0 select-text"
+                      className="min-h-[25vh] text-lg leading-relaxed font-serif text-surface-800 dark:text-surface-200 !px-0"
                   />
 
-                  {/* Checklist Section */}
-                  <div className="mt-12 space-y-3">
-                       <h4 className="text-xs font-bold uppercase tracking-widest text-surface-400 mb-2 flex items-center gap-2">
-                           <CheckSquare className="w-4 h-4" /> Checklist
-                       </h4>
-                       <div className="space-y-1">
-                           {checklist.map((item, i) => (
-                               <div key={i} className="flex items-center gap-3 group py-1">
-                                   <button onClick={() => {const n = [...checklist]; n[i].checked = !n[i].checked; setChecklist(n)}} className={`transition-colors ${item.checked ? "text-brand-500" : "text-surface-300 hover:text-brand-500"}`}>
-                                       {item.checked ? <CheckSquare className="w-5 h-5" /> : <Square className="w-5 h-5" />}
-                                   </button>
-                                   <input 
-                                       value={item.text} 
-                                       onChange={e => {const n = [...checklist]; n[i].text = e.target.value; setChecklist(n)}} 
-                                       className={`flex-1 bg-transparent border-none focus:ring-0 p-0 text-base font-serif select-text ${item.checked ? 'line-through text-surface-400' : 'text-surface-800 dark:text-surface-200'}`} 
-                                   />
-                                   <button onClick={() => setChecklist(checklist.filter((_, idx) => idx !== i))} className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-50 dark:hover:bg-red-900/20 rounded">
-                                       <Trash2 className="w-4 h-4 text-surface-400 hover:text-red-500" />
-                                   </button>
-                               </div>
-                           ))}
-                           <form onSubmit={addChecklistItem} className="flex items-center gap-3 opacity-60 focus-within:opacity-100 py-1 transition-opacity">
-                               <Plus className="w-5 h-5 text-surface-400" />
-                               <input 
-                                   value={newChecklistItem} 
-                                   onChange={e => setNewChecklistItem(e.target.value)} 
-                                   placeholder="Add item..." 
-                                   className="flex-1 bg-transparent border-none focus:ring-0 p-0 text-base font-serif placeholder:text-surface-300 select-text" 
-                               />
-                           </form>
-                       </div>
-                  </div>
-
-                  {/* Attachments Section */}
-                  <div className="mt-12 pt-8 border-t border-surface-200 dark:border-surface-800">
-                      <div className="flex items-center justify-between mb-6">
-                          <h4 className="text-xs font-bold uppercase tracking-widest text-surface-400 flex items-center gap-2">
-                              <ImageIcon className="w-4 h-4" /> Gallery
-                          </h4>
-                          <Button onClick={() => fileInputRef.current?.click()} variant="ghost" className="!p-2 text-xs">
-                              <Plus className="w-4 h-4 mr-1" /> Add Media
-                          </Button>
-                      </div>
-                      
-                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-                          {/* Existing Files */}
-                          {initialData?.attachments?.map(att => (
-                              <div 
-                                key={att.id} 
-                                onClick={() => { 
-                                    setCoverImageId(att.id); 
-                                    setCoverImage(att.thumbnailLink); 
-                                    setSelectedPendingIndex(null); 
-                                }}
-                                className={`group relative aspect-square rounded-xl overflow-hidden cursor-pointer border-2 transition-all shadow-sm ${coverImageId === att.id ? 'border-brand-500 ring-2 ring-brand-500/20' : 'border-surface-200 dark:border-surface-800 hover:border-surface-300'}`}
-                              >
-                                  <SecureImage fileId={att.id} thumbnailUrl={att.thumbnailLink} alt="" className="w-full h-full object-cover" />
-                                  
-                                  {att.mimeType.startsWith('video/') && (
-                                     <div className="absolute inset-0 flex items-center justify-center bg-black/20">
-                                         <Play className="w-6 h-6 text-white drop-shadow-md fill-current" />
-                                     </div>
-                                  )}
-
-                                  {coverImageId === att.id && (
-                                      <div className="absolute top-2 right-2 bg-brand-500 text-white p-1 rounded-full shadow-sm z-10">
-                                          <Star className="w-3 h-3 fill-current" />
-                                      </div>
-                                  )}
-                                  
-                                  <button 
-                                      onClick={(e) => {e.stopPropagation(); onDeleteAttachment && onDeleteAttachment(att.id)}} 
-                                      className="absolute bottom-2 right-2 bg-white/90 dark:bg-black/80 text-red-500 p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity hover:scale-110 shadow-sm z-10"
-                                  >
-                                      <Trash2 className="w-4 h-4" />
-                                  </button>
-                              </div>
-                          ))}
-
-                          {/* Pending Files */}
-                          {pendingFiles.map((f, i) => (
-                              <div 
-                                key={`pending-${i}`} 
-                                onClick={() => { setSelectedPendingIndex(i); setCoverImageId(undefined); setCoverImage(undefined); }}
-                                className={`group relative aspect-square rounded-xl overflow-hidden cursor-pointer border-2 transition-all shadow-sm ${selectedPendingIndex === i ? 'border-brand-500 ring-2 ring-brand-500/20' : 'border-surface-200 dark:border-surface-800 hover:border-surface-300'}`}
-                              >
-                                  {f.type.startsWith('video/') ? (
-                                      <div className="w-full h-full bg-black flex items-center justify-center relative">
-                                          <video src={URL.createObjectURL(f)} className="w-full h-full object-cover opacity-70" />
-                                          <div className="absolute inset-0 flex items-center justify-center">
-                                              <Play className="w-6 h-6 text-white/80" />
-                                          </div>
-                                          <div className="absolute top-2 left-2 px-1.5 py-0.5 bg-black/50 rounded text-[10px] text-white font-bold tracking-wider">VIDEO</div>
-                                      </div>
-                                  ) : (
-                                      <img src={URL.createObjectURL(f)} className="w-full h-full object-cover opacity-80" />
-                                  )}
-                                  
-                                  {selectedPendingIndex === i && (
-                                      <div className="absolute top-2 right-2 bg-brand-500 text-white p-1 rounded-full shadow-sm z-10">
-                                          <Star className="w-3 h-3 fill-current" />
-                                      </div>
-                                  )}
-                                  <button onClick={(e) => {e.stopPropagation(); setPendingFiles(p => p.filter((_, idx) => idx !== i))}} className="absolute bottom-2 right-2 bg-black/50 text-white p-1.5 rounded-lg hover:bg-red-500 transition-colors z-10"><X className="w-4 h-4" /></button>
-                              </div>
-                          ))}
-                          
-                          {/* Empty State / Add Button Tile */}
-                          {(pendingFiles.length === 0 && (!initialData?.attachments || initialData.attachments.length === 0)) && (
+                  {/* Mobile Mood Selector */}
+                  <div className="md:hidden mb-8 overflow-x-auto no-scrollbar pb-2">
+                    <div className="flex gap-2">
+                        {MOODS.map(m => (
                               <button 
-                                  onClick={() => fileInputRef.current?.click()}
-                                  className="aspect-square rounded-xl border-2 border-dashed border-surface-200 dark:border-surface-800 flex flex-col items-center justify-center text-surface-400 hover:text-brand-500 hover:border-brand-300 hover:bg-surface-50 dark:hover:bg-surface-900 transition-all"
+                                  key={m.id} 
+                                  onClick={() => setMood(m.id)}
+                                  className={`flex-none px-3 py-2 rounded-lg text-sm transition-all border ${mood === m.id ? 'bg-surface-900 text-white border-transparent' : 'bg-surface-50 dark:bg-surface-900 border-surface-200 dark:border-surface-800'}`}
                               >
-                                  <ImageIcon className="w-6 h-6 mb-1 opacity-50" />
-                                  <span className="text-[10px] font-bold uppercase tracking-widest">Add</span>
+                                  <span className="mr-2">{m.emoji}</span>
+                                  {m.label}
                               </button>
-                          )}
-                      </div>
+                        ))}
+                    </div>
                   </div>
 
-                  <input type="file" ref={fileInputRef} className="hidden" multiple accept="image/*,video/*" onChange={e => e.target.files && setPendingFiles(p => [...p, ...Array.from(e.target.files!)])} />
-                  
-                  {/* Bottom Spacer */}
-                  <div className="h-24" />
+                  {/* Checklist */}
+                  <div className="mt-8 space-y-2 mb-12">
+                       {checklist.map((item, i) => (
+                           <div key={i} className="flex items-center gap-3 group">
+                               <button onClick={() => {const n = [...checklist]; n[i].checked = !n[i].checked; setChecklist(n)}} className={item.checked ? "text-brand-500" : "text-surface-300"}>
+                                   {item.checked ? <CheckSquare className="w-5 h-5" /> : <Square className="w-5 h-5" />}
+                               </button>
+                               <input value={item.text} onChange={e => {const n = [...checklist]; n[i].text = e.target.value; setChecklist(n)}} className={`flex-1 bg-transparent border-none focus:ring-0 ${item.checked ? 'line-through text-surface-400' : 'text-surface-900 dark:text-surface-100'}`} />
+                               <button onClick={() => setChecklist(checklist.filter((_, idx) => idx !== i))} className="opacity-0 group-hover:opacity-100 transition-opacity"><Trash2 className="w-4 h-4 text-surface-300 hover:text-red-400" /></button>
+                           </div>
+                       ))}
+                       <form onSubmit={addChecklistItem} className="flex items-center gap-3 opacity-50 focus-within:opacity-100">
+                           <Plus className="w-5 h-5 text-surface-400" />
+                           <input value={newChecklistItem} onChange={e => setNewChecklistItem(e.target.value)} placeholder="Add item" className="flex-1 bg-transparent border-none focus:ring-0" />
+                       </form>
+                  </div>
+
+                  {/* Image Management */}
+                  {(pendingFiles.length > 0 || (initialData?.attachments?.length ?? 0) > 0) && (
+                      <div className="pt-6 border-t border-surface-200 dark:border-surface-800">
+                          <div className="flex items-center justify-between mb-4">
+                              <h4 className="font-bold text-[10px] uppercase tracking-widest text-surface-400">Attachments</h4>
+                              <p className="text-[10px] text-brand-600 dark:text-brand-400 font-bold flex items-center gap-1">
+                                  <Star className="w-3 h-3 fill-current" /> Cover Image
+                              </p>
+                          </div>
+                          
+                          <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
+                              {/* Pending Files */}
+                              {pendingFiles.map((f, i) => (
+                                  <div 
+                                    key={`pending-${i}`} 
+                                    onClick={() => { setSelectedPendingIndex(i); setCoverImageId(undefined); setCoverImage(undefined); }}
+                                    className={`relative aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${selectedPendingIndex === i ? 'border-brand-500 ring-2 ring-brand-500/20' : 'border-transparent hover:border-surface-200'}`}
+                                  >
+                                      <img src={URL.createObjectURL(f)} className="w-full h-full object-cover" />
+                                      {selectedPendingIndex === i && <div className="absolute top-1 right-1 bg-brand-500 text-white p-0.5 rounded-full"><Star className="w-3 h-3 fill-current" /></div>}
+                                      <button onClick={(e) => {e.stopPropagation(); setPendingFiles(p => p.filter((_, idx) => idx !== i))}} className="absolute bottom-1 right-1 bg-black/50 text-white p-1 rounded-full"><X className="w-3 h-3" /></button>
+                                  </div>
+                              ))}
+                              
+                              {/* Existing Files */}
+                              {initialData?.attachments?.map(att => (
+                                  <div 
+                                    key={att.id} 
+                                    onClick={() => { 
+                                        setCoverImageId(att.id); 
+                                        setCoverImage(att.thumbnailLink); 
+                                        setSelectedPendingIndex(null); 
+                                    }}
+                                    className={`relative aspect-square rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${coverImageId === att.id ? 'border-brand-500 ring-2 ring-brand-500/20' : 'border-transparent hover:border-surface-200'}`}
+                                  >
+                                      <SecureImage fileId={att.id} thumbnailUrl={att.thumbnailLink} alt="" className="w-full h-full object-cover" />
+                                      {coverImageId === att.id && <div className="absolute top-1 right-1 bg-brand-500 text-white p-0.5 rounded-full"><Star className="w-3 h-3 fill-current" /></div>}
+                                      <button onClick={(e) => {e.stopPropagation(); onDeleteAttachment && onDeleteAttachment(att.id)}} className="absolute bottom-1 right-1 bg-red-500/80 hover:bg-red-500 text-white p-1 rounded-full"><Trash2 className="w-3 h-3" /></button>
+                                  </div>
+                              ))}
+                          </div>
+                      </div>
+                  )}
+
+                  <input type="file" ref={fileInputRef} className="hidden" multiple accept="image/*" onChange={e => e.target.files && setPendingFiles(p => [...p, ...Array.from(e.target.files!)])} />
               </div>
           </div>
       </div>
@@ -1139,7 +1008,6 @@ const EntryReaderView: React.FC<{
   }> = ({ entry, onBack, onEdit, onDelete, isLoading, fontStyle, setFontStyle }) => {
     
     const [showFontMenu, setShowFontMenu] = useState(false);
-    const [lightboxMedia, setLightboxMedia] = useState<JournalAttachment | null>(null);
 
     if (isLoading || !entry) return <LoadingScreen message="Loading..." />;
     const moodObj = MOODS.find(m => m.id === entry.mood);
@@ -1253,22 +1121,13 @@ const EntryReaderView: React.FC<{
                             <h4 className="font-bold text-xs uppercase tracking-widest text-surface-400 mb-6">Gallery</h4>
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                                 {entry.attachments.map((att) => (
-                                    <div 
-                                        key={att.id} 
-                                        onClick={() => setLightboxMedia(att)}
-                                        className="relative rounded-lg overflow-hidden aspect-square border border-surface-200 dark:border-surface-800 cursor-zoom-in"
-                                    >
+                                    <div key={att.id} className="rounded-lg overflow-hidden aspect-square border border-surface-200 dark:border-surface-800">
                                         <SecureImage 
                                             fileId={att.id} 
                                             thumbnailUrl={att.thumbnailLink ? att.thumbnailLink.replace(/=s\d+/, '=s500') : undefined} 
                                             alt="" 
                                             className="w-full h-full object-cover hover:scale-105 transition-transform duration-500" 
                                         />
-                                        {att.mimeType.startsWith('video/') && (
-                                            <div className="absolute inset-0 flex items-center justify-center bg-black/20 group-hover:bg-black/40 transition-colors pointer-events-none">
-                                                <Play className="w-8 h-8 text-white drop-shadow-md fill-current" />
-                                            </div>
-                                        )}
                                     </div>
                                 ))}
                             </div>
@@ -1276,39 +1135,6 @@ const EntryReaderView: React.FC<{
                     )}
                 </div>
             </article>
-
-             {/* Reader Lightbox */}
-             {lightboxMedia && (
-                <div 
-                    className="fixed inset-0 z-[100] bg-black/95 backdrop-blur-xl flex items-center justify-center animate-fade-in p-4"
-                    onClick={() => setLightboxMedia(null)}
-                >
-                    <button 
-                        onClick={() => setLightboxMedia(null)}
-                        className="absolute top-4 right-4 p-2 text-white/70 hover:text-white bg-white/10 hover:bg-white/20 rounded-full transition-all z-20"
-                    >
-                        <X className="w-6 h-6" />
-                    </button>
-                    
-                    <div className="relative w-full max-w-5xl max-h-full flex items-center justify-center" onClick={e => e.stopPropagation()}>
-                         {lightboxMedia.mimeType.startsWith('video/') ? (
-                             <SecureVideoPlayer 
-                                fileId={lightboxMedia.id} 
-                                autoPlay 
-                                className="max-w-full max-h-[90vh] w-auto h-auto rounded-lg shadow-2xl" 
-                             />
-                         ) : (
-                             <SecureImage 
-                                fileId={lightboxMedia.id}
-                                thumbnailUrl={lightboxMedia.thumbnailLink ? lightboxMedia.thumbnailLink.replace(/=s\d+/, '=s1600') : undefined}
-                                alt={lightboxMedia.name}
-                                className="!bg-transparent !overflow-visible flex items-center justify-center"
-                                imgClassName="max-w-[95vw] max-h-[90vh] w-auto h-auto object-contain shadow-2xl rounded-sm"
-                            />
-                         )}
-                    </div>
-                </div>
-            )}
         </div>
       </div>
     );
