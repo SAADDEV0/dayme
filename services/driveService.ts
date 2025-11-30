@@ -81,12 +81,9 @@ export const DriveService = {
     return new Promise((resolve, reject) => {
       window.gapi.load('client', async () => {
         try {
-          // Use manual load to avoid discovery docs issues
-          await window.gapi.client.load('drive', 'v3');
-          
           await window.gapi.client.init({
             apiKey: config.apiKey,
-            discoveryDocs: [], // Explicitly empty to prevent auto-fetch
+            discoveryDocs: [DISCOVERY_DOC],
           });
 
           DriveService.tokenClient = window.google.accounts.oauth2.initTokenClient({
@@ -248,6 +245,7 @@ export const DriveService = {
     return DriveService._executeEntryQuery(query, true);
   },
 
+  // Helper to fetch all folders to map IDs to Names for date reconstruction
   _fetchAllFolders: async (): Promise<Map<string, {name: string, parentId: string}>> => {
       const folderMap = new Map<string, {name: string, parentId: string}>();
       let pageToken = null;
@@ -281,9 +279,11 @@ export const DriveService = {
       return folderMap;
   },
 
-  getAllMedia: async (): Promise<JournalAttachment[]> => {
-    const query = "(mimeType contains 'image/' or mimeType contains 'video/') and trashed = false";
+  getAllImages: async (): Promise<JournalAttachment[]> => {
+    const query = "mimeType contains 'image/' and trashed = false";
     try {
+      // 1. Fetch all images
+      // We need 'parents' to deduce the date if metadata is missing
       const imagesPromise = window.gapi.client.drive.files.list({
         q: query,
         fields: 'files(id, name, mimeType, thumbnailLink, webViewLink, createdTime, appProperties, parents)',
@@ -291,19 +291,24 @@ export const DriveService = {
         pageSize: 1000 
       });
 
+      // 2. Fetch all folders (cached in memory for this operation)
       const foldersPromise = DriveService._fetchAllFolders();
 
       const [imagesRes, folderMap] = await Promise.all([imagesPromise, foldersPromise]);
       const rawImages = imagesRes.result.files || [];
 
+      // 3. Process images and reconstruct dates
       return rawImages.map((img: any) => {
           let journalDate = img.appProperties?.journalDate;
 
+          // If no metadata date, try to reconstruct from folder path:
+          // Structure: .../YYYY/MM Month/DD/images/img.png
           if (!journalDate && img.parents && img.parents.length > 0) {
              try {
                  const imagesFolderId = img.parents[0];
                  const imagesFolder = folderMap.get(imagesFolderId);
                  
+                 // Confirm we are in an 'images' folder
                  if (imagesFolder && imagesFolder.name.toLowerCase() === 'images' && imagesFolder.parentId) {
                      const dayFolderId = imagesFolder.parentId;
                      const dayFolder = folderMap.get(dayFolderId);
@@ -317,11 +322,14 @@ export const DriveService = {
                              const yearFolder = folderMap.get(yearFolderId);
 
                              if (yearFolder) {
+                                 // We have the full chain. Parse names.
+                                 // Year: "2023", Month: "10 October", Day: "15"
                                  const year = parseInt(yearFolder.name);
                                  const month = parseInt(monthFolder.name.split(' ')[0]);
                                  const day = parseInt(dayFolder.name);
                                  
                                  if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+                                     // Construct date object (using noon to avoid timezone shift issues)
                                      const d = new Date(year, month - 1, day, 12, 0, 0);
                                      journalDate = d.toISOString();
                                  }
@@ -330,10 +338,11 @@ export const DriveService = {
                      }
                  }
              } catch (e) {
-                 // Fallback
+                 // Fallback if structure is unexpected
              }
           }
 
+          // Fallback to createdTime if all else fails
           if (!journalDate) {
               journalDate = img.createdTime;
           }
@@ -341,12 +350,13 @@ export const DriveService = {
           return {
               ...img,
               journalDate: journalDate,
+              // Inject the computed date back into appProperties so the UI uses it uniformly
               appProperties: { ...img.appProperties, journalDate }
           };
       });
 
     } catch (e) {
-      console.error("Error fetching media", e);
+      console.error("Error fetching images", e);
       return [];
     }
   },
@@ -567,6 +577,7 @@ ${entry.content}${checklistContent}`;
         }
       });
     } else {
+      // Manual Multipart Construction for Create
       const boundary = '-------314159265358979323846';
       const delimiter = "\r\n--" + boundary + "\r\n";
       const close_delim = "\r\n--" + boundary + "--";
@@ -595,6 +606,7 @@ ${entry.content}${checklistContent}`;
     let coverImageIdToSet: string | undefined = undefined;
     let coverImageLinkToSet: string | undefined = undefined;
 
+    // Handle Image Uploads with Robust Multipart Request
     let uploadIndex = 0;
     for (const rawFile of filesToUpload) {
        let fileToUpload = rawFile;
@@ -661,6 +673,7 @@ ${entry.content}${checklistContent}`;
        uploadIndex++;
     }
 
+    // Determine Final Cover
     let finalCoverId = entry.coverImageId; 
     let finalCoverLink = entry.coverImage;
 
@@ -669,6 +682,7 @@ ${entry.content}${checklistContent}`;
         finalCoverLink = coverImageLinkToSet;
     }
 
+    // Update metadata with final cover decision
     if (finalCoverId) {
         try {
             await window.gapi.client.drive.files.update({
@@ -685,9 +699,11 @@ ${entry.content}${checklistContent}`;
         }
     }
 
+    // SYNC: Ensure ALL existing images in this folder have the correct date metadata.
+    // This repairs "broken" old images when an entry is saved.
     try {
         const existingImagesReq = await window.gapi.client.drive.files.list({
-            q: `'${imagesFolderId}' in parents and trashed = false and (mimeType contains 'image/' or mimeType contains 'video/')`,
+            q: `'${imagesFolderId}' in parents and trashed = false and mimeType contains 'image/'`,
             fields: 'files(id, appProperties)'
         });
         const existingImages = existingImagesReq.result.files || [];
@@ -704,7 +720,7 @@ ${entry.content}${checklistContent}`;
             return Promise.resolve();
         }));
     } catch (e) {
-        console.warn("Failed to sync media dates", e);
+        console.warn("Failed to sync image dates", e);
     }
 
     return { id: fileId, coverImageId: finalCoverId, coverImage: finalCoverLink };
@@ -730,7 +746,9 @@ ${entry.content}${checklistContent}`;
     });
   },
 
+  // Optimized Fetch with Caching
   fetchAuthenticatedBlob: async (url: string): Promise<string> => {
+    // 1. Try Cache API first (Persistent across reloads)
     if ('caches' in window) {
       try {
         const cache = await caches.open(IMAGE_CACHE_NAME);
@@ -745,6 +763,7 @@ ${entry.content}${checklistContent}`;
       }
     }
 
+    // 2. Network Fetch if not in cache
     try {
       const token = window.gapi.client.getToken();
       const accessToken = token ? token.access_token : null;
@@ -756,6 +775,7 @@ ${entry.content}${checklistContent}`;
       
       if (!response.ok) throw new Error(`Failed to fetch content: ${response.statusText}`);
       
+      // 3. Save to Cache API if successful
       if ('caches' in window) {
          try {
            const cache = await caches.open(IMAGE_CACHE_NAME);
